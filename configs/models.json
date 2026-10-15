@@ -1,0 +1,80 @@
+[
+  {
+    "repo": "microsoft/TRELLIS-text-xlarge",
+    "revision": "e0b00432b8e3a8ecee0df806ab1df9f7281f2be4",
+    "directory": "TRELLIS-text-xlarge",
+    "files": [
+      "ckpts/slat_flow_txt_dit_XL_64l8p2_fp16.json",
+      "ckpts/slat_flow_txt_dit_XL_64l8p2_fp16.safetensors",
+      "ckpts/ss_flow_txt_dit_XL_16l8_fp16.json",
+      "ckpts/ss_flow_txt_dit_XL_16l8_fp16.safetensors",
+      "pipeline.json"
+    ]
+  },
+  {
+    "repo": "microsoft/TRELLIS-image-large",
+    "revision": "25e0d31ffbebe4b5a97464dd851910efc3002d96",
+    "directory": "TRELLIS-image-large",
+    "files": [
+      "ckpts/slat_dec_gs_swin8_B_64l8gs32_fp16.json",
+      "ckpts/slat_dec_gs_swin8_B_64l8gs32_fp16.safetensors",
+      "ckpts/slat_dec_mesh_swin8_B_64l8m256c_fp16.json",
+      "ckpts/slat_dec_mesh_swin8_B_64l8m256c_fp16.safetensors",
+      "ckpts/slat_dec_rf_swin8_B_64l8r16_fp16.json",
+      "ckpts/slat_dec_rf_swin8_B_64l8r16_fp16.safetensors",
+      "ckpts/ss_dec_conv3d_16l8_fp16.json",
+      "ckpts/ss_dec_conv3d_16l8_fp16.safetensors"
+    ]
+  },
+  {
+    "repo": "openai/clip-vit-large-patch14",
+    "revision": "32bd64288804d66eefd0ccbe215aa642df71cc41",
+    "directory": "clip-vit-large-patch14",
+    "files": [
+      "config.json",
+      "merges.txt",
+      "preprocessor_config.json",
+      "pytorch_model.bin",
+      "special_tokens_map.json",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vocab.json"
+    ]
+  },
+  {
+    "repo": "sentence-transformers/clip-ViT-B-16",
+    "revision": "42c4db70fce292a90130d00f1870933906461299",
+    "directory": "sentence-transformers-clip-ViT-B-16",
+    "files": [
+      "0_CLIPModel/config.json",
+      "0_CLIPModel/merges.txt",
+      "0_CLIPModel/model.safetensors",
+      "0_CLIPModel/preprocessor_config.json",
+      "0_CLIPModel/pytorch_model.bin",
+      "0_CLIPModel/special_tokens_map.json",
+      "0_CLIPModel/tokenizer.json",
+      "0_CLIPModel/tokenizer_config.json",
+      "0_CLIPModel/vocab.json",
+      "config_sentence_transformers.json",
+      "modules.json"
+    ]
+  },
+  {
+    "repo": "Qwen/Qwen3-14B",
+    "revision": "40c069824f4251a91eefaf281ebe4c544efd3e18",
+    "directory": "Qwen3-14B"
+  },
+  {
+    "repo": "Qwen/Qwen3.6-35B-A3B",
+    "revision": "995ad96eacd98c81ed38be0c5b274b04031597b0",
+    "directory": "Qwen3.6-35B-A3B"
+  },
+  {
+    "repo": "gvecchio/MatFuse",
+    "revision": "5b8131f9559c5f35b52a5d4e49df380fa7cf3fd5",
+    "directory": "MatFuse",
+    "files": [
+      "checkpoints/matfuse-full.ckpt"
+    ]
+  }
+]

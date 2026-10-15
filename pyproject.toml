@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "scenepace"
+version = "0.1.0"
+description = "Efficient language-guided 3D scene generation and reinforcement learning"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+[tool.setuptools.packages.find]
+include = ["scene_pace*", "sage_rl*", "client*"]
+[tool.setuptools.package-data]
+sage_rl = ["evaluation/*.txt"]

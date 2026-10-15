@@ -1,0 +1,65 @@
+{
+  "paths": {
+    "models": "models",
+    "output": "outputs",
+    "cache": ".cache",
+    "runtime": ".runtime"
+  },
+  "python": {
+    "scene": ".runtime/envs/scene/bin/python",
+    "rl": ".runtime/envs/rl/bin/python",
+    "vllm": ".runtime/envs/vllm/bin/python",
+    "trellis": ".runtime/envs/trellis/bin/python",
+    "isaac": ".runtime/envs/isaac/bin/python"
+  },
+  "actor": {
+    "mode": "local",
+    "model": "Qwen3-14B",
+    "served_name": "scene-policy",
+    "endpoint": "http://127.0.0.1:1082/v1",
+    "api_key_env": "SCENEPACE_ACTOR_API_KEY",
+    "wire_api": "chat",
+    "gpus": "4",
+    "tensor_parallel_size": 1,
+    "context_tokens": 16384,
+    "output_tokens": 2048,
+    "temperature": 0.6,
+    "api_output_tokens": 16384,
+    "api_reasoning_effort": "medium"
+  },
+  "vlm": {
+    "model": "Qwen3.6-35B-A3B",
+    "served_name": "qwen-vl-local",
+    "endpoint": "http://127.0.0.1:1081/v1",
+    "api_key_env": "SCENEPACE_VLM_API_KEY",
+    "gpus": "0,1,2,3",
+    "tensor_parallel_size": 4,
+    "context_tokens": 65536
+  },
+  "trellis": {
+    "model": "TRELLIS-text-xlarge",
+    "endpoint": "http://127.0.0.1:10070",
+    "gpus": "6",
+    "source": ".runtime/deps/TRELLIS"
+  },
+  "scene": {
+    "gpu": "5",
+    "isaac_gpu": 7,
+    "isaac_port": 11323,
+    "max_tool_calls": 8,
+    "timeout_seconds": 10800,
+    "evaluate": true,
+    "stage_timing": true,
+    "asset_workers": 2,
+    "seed": 11
+  },
+  "training": {
+    "tasks": "data/train.jsonl",
+    "config": "configs/training.yaml",
+    "resume": "auto",
+    "scene_endpoints": [
+      "http://127.0.0.1:18090"
+    ],
+    "proxy_host": ""
+  }
+}

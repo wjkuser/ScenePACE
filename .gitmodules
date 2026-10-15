@@ -1,0 +1,3 @@
+[submodule "AReaL"]
+	path = third_party/AReaL
+	url = https://github.com/areal-project/AReaL.git

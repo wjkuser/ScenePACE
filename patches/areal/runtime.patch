@@ -1,0 +1,488 @@
+diff --git a/areal/api/cli_args.py b/areal/api/cli_args.py
+index 50b619e..0e95102 100644
+--- a/areal/api/cli_args.py
++++ b/areal/api/cli_args.py
+@@ -221,6 +221,10 @@ class GenerationHyperparameters:
+             "help": "One or multiple stop words. Generation will stop if one of these words is sampled."
+         },
+     )
++    logit_bias: dict[str, float] | None = field(
++        default=None,
++        metadata={"help": "Per-token logit adjustments keyed by token ID."},
++    )
+     frequency_penalty: float = field(
+         default=0.0,
+         metadata={
+diff --git a/areal/engine/fsdp_engine.py b/areal/engine/fsdp_engine.py
+index 8493c26..73ee359 100644
+--- a/areal/engine/fsdp_engine.py
++++ b/areal/engine/fsdp_engine.py
+@@ -5,8 +5,10 @@ from __future__ import annotations
+ import copy
+ import dataclasses
+ import gc
++import json
+ import math
+ import os
++import random
+ import time
+ from collections.abc import Callable, Iterator
+ from concurrent.futures import Future
+@@ -14,6 +16,7 @@ from contextlib import contextmanager, nullcontext
+ from datetime import datetime
+ from typing import TYPE_CHECKING, Any
+ 
++import numpy as np
+ import torch
+ import torch.distributed as dist
+ import torch.distributed.checkpoint as dcp
+@@ -1887,27 +1890,154 @@ class FSDPEngine(TrainEngine):
+         path: str,
+         with_optim: bool,
+     ):
+-        """Save model in PyTorch Distributed Checkpoint (DCP) format."""
++        """Save DCP, including per-rank runtime state when with_optim is true.
++
++        A full recovery requires the same worker topology and all runtime
++        sidecars. The caller owns publication/commit of the complete directory.
++        """
+         if self.model is None:
+             raise RuntimeError("Model not initialized")
+ 
+         os.makedirs(path, exist_ok=True)
+ 
++        if with_optim:
++            if self.optimizer is None or self.lr_scheduler is None:
++                raise RuntimeError("Full DCP recovery requires optimizer and scheduler")
++            rank = dist.get_rank() if dist.is_initialized() else 0
++            world_size = dist.get_world_size() if dist.is_initialized() else 1
++            runtime_state = {
++                "format_version": 1,
++                "rank": rank,
++                "world_size": world_size,
++                "lr_scheduler": self.lr_scheduler.state_dict(),
++                "engine_version": self.get_version(),
++                "python_rng": random.getstate(),
++                "numpy_rng": np.random.get_state(),
++                "torch_rng": torch.get_rng_state(),
++                # FSDP workers use one assigned CUDA device. Do not initialize
++                # contexts on every visible GPU merely to capture RNG state.
++                "cuda_device": (
++                    torch.cuda.current_device() if torch.cuda.is_available() else None
++                ),
++                "cuda_rng": (
++                    torch.cuda.get_rng_state() if torch.cuda.is_available() else None
++                ),
++            }
++            state_path = os.path.join(path, f"engine_state_rank_{rank}.pt")
++            torch.save(runtime_state, state_path + ".tmp")
++            os.replace(state_path + ".tmp", state_path)
++
+         dcp_state = DCPState(self.model, self.optimizer if with_optim else None)
+         state_dict = {"dcp": dcp_state}
+         dcp.save(state_dict, checkpoint_id=path)
++        if with_optim and rank == 0:
++            # The enclosing trainer/publisher must wait for every rank before
++            # publishing this directory. This marker identifies the new schema;
++            # it is not a remote checkpoint commit marker.
++            marker_path = os.path.join(path, "engine_state.json")
++            with open(marker_path + ".tmp", "w") as stream:
++                json.dump({"format_version": 1, "world_size": world_size}, stream)
++            os.replace(marker_path + ".tmp", marker_path)
+ 
+     def _load_from_dcp(self, path: str, with_optim: bool):
+-        """Load model from Distributed Checkpoint (DCP) format."""
++        """Restore DCP and, when present, scheduler/version/per-rank RNG.
++
++        Legacy checkpoints without the runtime marker remain loadable, but
++        cannot provide equivalent training continuation (a warning is emitted).
++        """
+         if self.model is None:
+             raise RuntimeError("Model not initialized")
+ 
++        runtime_state = None
++        if with_optim:
++            runtime_error = None
++            try:
++                marker_path = os.path.join(path, "engine_state.json")
++                if os.path.exists(marker_path):
++                    with open(marker_path) as stream:
++                        marker = json.load(stream)
++                    rank = dist.get_rank() if dist.is_initialized() else 0
++                    world_size = dist.get_world_size() if dist.is_initialized() else 1
++                    if marker != {"format_version": 1, "world_size": world_size}:
++                        raise RuntimeError(
++                            "Incompatible DCP runtime schema or world size"
++                        )
++                    # Trusted training checkpoints only: RNG includes Python/NumPy
++                    # objects that are deliberately not restricted to tensors.
++                    runtime_state = torch.load(
++                        os.path.join(path, f"engine_state_rank_{rank}.pt"),
++                        map_location="cpu",
++                        weights_only=False,
++                    )
++                    required = {
++                        "format_version",
++                        "rank",
++                        "world_size",
++                        "lr_scheduler",
++                        "engine_version",
++                        "python_rng",
++                        "numpy_rng",
++                        "torch_rng",
++                        "cuda_device",
++                        "cuda_rng",
++                    }
++                    if not required.issubset(runtime_state) or (
++                        runtime_state["format_version"] != 1
++                        or runtime_state["rank"] != rank
++                        or runtime_state["world_size"] != world_size
++                    ):
++                        raise RuntimeError(
++                            "Invalid or incomplete DCP engine runtime state"
++                        )
++                    if self.lr_scheduler is None or self.optimizer is None:
++                        raise RuntimeError(
++                            "Full DCP recovery requires optimizer and scheduler"
++                        )
++                    cuda_device = (
++                        torch.cuda.current_device()
++                        if torch.cuda.is_available()
++                        else None
++                    )
++                    if runtime_state["cuda_device"] != cuda_device:
++                        raise RuntimeError(
++                            "DCP CUDA RNG topology differs from this worker"
++                        )
++                else:
++                    self.logger.warning(
++                        "Legacy DCP has no engine_state.json: scheduler, RNG, and "
++                        "engine version cannot be restored; this is not exact recovery."
++                    )
++            except Exception as exc:
++                runtime_error = exc
++            if dist.is_initialized():
++                # A missing shard on one rank must not leave other ranks blocked
++                # in DCP collectives. Every rank participates in this check.
++                errors = [None] * dist.get_world_size(self.cpu_group)
++                dist.all_gather_object(
++                    errors,
++                    None if runtime_error is None else str(runtime_error),
++                    group=self.cpu_group,
++                )
++                if any(error is not None for error in errors):
++                    raise RuntimeError(f"DCP runtime validation failed: {errors}")
++            elif runtime_error is not None:
++                raise runtime_error
++
+         dcp_state = DCPState(self.model, self.optimizer if with_optim else None)
+         state_dict = {"dcp": dcp_state}
+         dcp.load(
+             state_dict=state_dict,
+             checkpoint_id=path,
+         )
++        if runtime_state is not None:
++            self.lr_scheduler.load_state_dict(runtime_state["lr_scheduler"])
++            self.set_version(runtime_state["engine_version"])
++            # Restore after DCP load, which may initialize optimizer state.
++            random.setstate(runtime_state["python_rng"])
++            np.random.set_state(runtime_state["numpy_rng"])
++            torch.set_rng_state(runtime_state["torch_rng"])
++            if runtime_state["cuda_rng"] is not None:
++                torch.cuda.set_rng_state(runtime_state["cuda_rng"])
+ 
+     def _save_optimizer_state(self, path: str):
+         assert self.optimizer is not None
+diff --git a/areal/engine/vllm_remote.py b/areal/engine/vllm_remote.py
+index feb77b7..2c0d55d 100644
+--- a/areal/engine/vllm_remote.py
++++ b/areal/engine/vllm_remote.py
+@@ -80,6 +80,8 @@ class VLLMBackend:
+         }
+         if gconfig.stop:
+             payload["stop"] = gconfig.stop
++        if gconfig.logit_bias:
++            payload["logit_bias"] = gconfig.logit_bias
+         if gconfig.seed is not None:
+             payload["seed"] = gconfig.seed
+ 
+diff --git a/areal/experimental/openai/client.py b/areal/experimental/openai/client.py
+index b0cc277..0295992 100644
+--- a/areal/experimental/openai/client.py
++++ b/areal/experimental/openai/client.py
+@@ -1217,6 +1217,7 @@ class AsyncCompletionsWithReward(BaseAsyncCompletions):
+             top_p=top_p_val,
+             top_k=top_k_val,
+             stop=stop_tokens,
++            logit_bias=extra_body.get("logit_bias"),
+             greedy=temp == 0,
+             frequency_penalty=frequency_penalty,
+             lora_name=self.lora_name,
+@@ -1243,6 +1244,7 @@ class AsyncCompletionsWithReward(BaseAsyncCompletions):
+         # Parse raw output first: prefilled Qwen thinking may enter a tool call
+         # without emitting </think>. Splitting first would swallow that call.
+         tool_calls = None
++        raw_output_text = output_text
+         try:
+             if (is_omitted(tool_choice) or tool_choice != "none") and tools_list:
+                 tool_calls, output_text, response.stop_reason = process_tool_calls(
+@@ -1259,6 +1261,19 @@ class AsyncCompletionsWithReward(BaseAsyncCompletions):
+                 f"{output_text}"
+             )
+ 
++        # A failed tool-call retry must not retain a cache parent absent from
++        # the agent's conversation history.
++        if (
++            cache is not None
++            and completion_id in cache
++            and tools_list
++            and (is_omitted(tool_choice) or tool_choice != "none")
++            and "<tool_call>" in raw_output_text
++            and not tool_calls
++        ):
++            del cache[completion_id]
++            cache = None
++
+         reasoning_text, output_text = split_reasoning(
+             output_text,
+             self.reasoning_parser,
+@@ -1668,6 +1683,7 @@ class AsyncResponsesWithReward(BaseAsyncResponses):
+             ),
+             top_p=top_p_val,
+             stop=stop,
++            logit_bias=extra_body.get("logit_bias"),
+             greedy=temp == 0,
+             frequency_penalty=frequency_penalty,
+             lora_name=self.lora_name,
+diff --git a/areal/experimental/openai/proxy/proxy_rollout_server.py b/areal/experimental/openai/proxy/proxy_rollout_server.py
+index 9eb8994..7e09c49 100644
+--- a/areal/experimental/openai/proxy/proxy_rollout_server.py
++++ b/areal/experimental/openai/proxy/proxy_rollout_server.py
+@@ -875,6 +875,13 @@ async def _call_client_create(
+     )
+ 
+     kwargs = request.model_dump() if isinstance(request, BaseModel) else dict(request)
++    # The OpenAI SDK flattens extra_body into the HTTP request body.
++    extra_body = dict(kwargs.get("extra_body") or {})
++    for key in ("chat_template_kwargs", "logit_bias"):
++        if key in kwargs:
++            extra_body[key] = kwargs.pop(key)
++    if extra_body:
++        kwargs["extra_body"] = extra_body
+     token_limits = {"max_tokens", "max_completion_tokens"}
+     explicit_fields = (
+         request.model_fields_set if isinstance(request, BaseModel) else set(request)
+diff --git a/areal/experimental/openai/tool_call_parser.py b/areal/experimental/openai/tool_call_parser.py
+index 89f0dfa..b52671c 100644
+--- a/areal/experimental/openai/tool_call_parser.py
++++ b/areal/experimental/openai/tool_call_parser.py
+@@ -308,6 +308,23 @@ def _process_tool_calls_qwen3_coder_xml(
+             arguments = json.dumps(args, ensure_ascii=False)
+             block_calls.append(_build_tool_call(tool_name, arguments, use_responses))
+ 
++        if not block_calls:
++            try:
++                payload = json.loads(body.strip())
++            except (TypeError, json.JSONDecodeError):
++                payload = None
++            if isinstance(payload, dict):
++                tool_name = payload.get("name")
++                arguments = payload.get("arguments", {})
++                if isinstance(tool_name, str) and tool_name:
++                    if isinstance(arguments, str):
++                        json.loads(arguments)
++                    else:
++                        arguments = json.dumps(arguments, ensure_ascii=False)
++                    block_calls.append(
++                        _build_tool_call(tool_name, arguments, use_responses)
++                    )
++
+         if block_calls:
+             tool_calls.extend(block_calls)
+             remove_spans.append(tool_match.span())
+diff --git a/tests/test_fsdp_runtime_checkpoint.py b/tests/test_fsdp_runtime_checkpoint.py
+new file mode 100644
+index 0000000..c62b21c
+--- /dev/null
++++ b/tests/test_fsdp_runtime_checkpoint.py
+@@ -0,0 +1,180 @@
++# SPDX-License-Identifier: Apache-2.0
++"""CPU checks of real DCP optimizer/runtime recovery (no FSDP mocking)."""
++
++import copy
++import json
++import random
++from datetime import timedelta
++from pathlib import Path
++from unittest.mock import Mock
++
++import numpy as np
++import pytest
++import torch
++import torch.distributed as dist
++import torch.multiprocessing as mp
++from torch import nn
++
++from areal.engine.fsdp_engine import FSDPEngine
++
++
++def _engine():
++    engine = object.__new__(FSDPEngine)
++    engine.model = nn.Sequential(nn.Linear(4, 4), nn.Dropout(0.3), nn.Linear(4, 1))
++    engine.optimizer = torch.optim.AdamW(engine.model.parameters(), lr=0.01)
++    engine.lr_scheduler = torch.optim.lr_scheduler.StepLR(
++        engine.optimizer, step_size=2, gamma=0.5
++    )
++    engine._version = 0
++    engine._initialized = True
++    engine.logger = Mock()
++    return engine
++
++
++def _step(engine):
++    engine.optimizer.zero_grad()
++    inputs = torch.randn(3, 4) * np.random.uniform() + random.random()
++    loss = engine.model(inputs).square().mean()
++    loss.backward()
++    if dist.is_initialized():
++        for parameter in engine.model.parameters():
++            dist.all_reduce(parameter.grad)
++            parameter.grad.div_(dist.get_world_size())
++    engine.optimizer.step()
++    engine.lr_scheduler.step()
++    engine.set_version(engine.get_version() + 1)
++    return loss.detach()
++
++
++def _assert_nested_equal(actual, expected):
++    if isinstance(expected, torch.Tensor):
++        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
++    elif isinstance(expected, dict):
++        assert actual.keys() == expected.keys()
++        for key in expected:
++            _assert_nested_equal(actual[key], expected[key])
++    elif isinstance(expected, (list, tuple)):
++        assert len(actual) == len(expected)
++        for left, right in zip(actual, expected):
++            _assert_nested_equal(left, right)
++    else:
++        assert actual == expected
++
++
++@pytest.fixture(autouse=True)
++def cpu_only(monkeypatch):
++    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
++
++
++def test_dcp_resume_matches_uninterrupted_optimizer_update(tmp_path):
++    random.seed(101)
++    np.random.seed(102)
++    torch.manual_seed(103)
++    original = _engine()
++    for _ in range(5):
++        _step(original)
++    original._save_to_dcp(str(tmp_path), with_optim=True)
++    expected_losses = [_step(original) for _ in range(3)]
++    expected_model = copy.deepcopy(original.model.state_dict())
++    expected_optim = copy.deepcopy(original.optimizer.state_dict())
++    expected_scheduler = copy.deepcopy(original.lr_scheduler.state_dict())
++
++    # Simulate a new worker with unrelated initialization and random streams.
++    random.seed(901)
++    np.random.seed(902)
++    torch.manual_seed(903)
++    restored = _engine()
++    restored._load_from_dcp(str(tmp_path), with_optim=True)
++    assert restored.get_version() == 5
++    actual_losses = [_step(restored) for _ in range(3)]
++
++    _assert_nested_equal(actual_losses, expected_losses)
++    _assert_nested_equal(restored.model.state_dict(), expected_model)
++    _assert_nested_equal(restored.optimizer.state_dict(), expected_optim)
++    _assert_nested_equal(restored.lr_scheduler.state_dict(), expected_scheduler)
++    assert restored.get_version() == original.get_version() == 8
++
++
++def test_dcp_marked_checkpoint_missing_rank_state_fails(tmp_path):
++    engine = _engine()
++    _step(engine)
++    engine._save_to_dcp(str(tmp_path), with_optim=True)
++    (tmp_path / "engine_state_rank_0.pt").unlink()
++    with pytest.raises(FileNotFoundError):
++        _engine()._load_from_dcp(str(tmp_path), with_optim=True)
++
++
++def test_dcp_changed_world_size_fails(tmp_path):
++    (tmp_path / "engine_state.json").write_text(
++        json.dumps({"format_version": 1, "world_size": 2})
++    )
++    with pytest.raises(RuntimeError, match="world size"):
++        _engine()._load_from_dcp(str(tmp_path), with_optim=True)
++
++
++def test_dcp_legacy_checkpoint_warns_without_claiming_full_resume(tmp_path):
++    original = _engine()
++    _step(original)
++    original._save_to_dcp(str(tmp_path), with_optim=True)
++    (tmp_path / "engine_state.json").unlink()
++    (tmp_path / "engine_state_rank_0.pt").unlink()
++    restored = _engine()
++    restored._load_from_dcp(str(tmp_path), with_optim=True)
++    restored.logger.warning.assert_called_once()
++    _assert_nested_equal(restored.model.state_dict(), original.model.state_dict())
++    _assert_nested_equal(
++        restored.optimizer.state_dict(), original.optimizer.state_dict()
++    )
++
++
++def _distributed_resume_worker(rank, checkpoint_dir, init_file):
++    torch.cuda.is_available = lambda: False
++    dist.init_process_group(
++        "gloo",
++        init_method=f"file://{init_file}",
++        rank=rank,
++        world_size=2,
++        timeout=timedelta(seconds=60),
++    )
++    try:
++        torch.manual_seed(103)
++        original = _engine()
++        original._cpu_group = dist.group.WORLD
++        # Identical parameters, but a separate stochastic stream on each rank.
++        random.seed(101 + rank)
++        np.random.seed(102 + rank)
++        torch.manual_seed(104 + rank)
++        for _ in range(5):
++            _step(original)
++        original._save_to_dcp(checkpoint_dir, with_optim=True)
++        expected_losses = [_step(original) for _ in range(3)]
++        expected_model = copy.deepcopy(original.model.state_dict())
++        expected_optim = copy.deepcopy(original.optimizer.state_dict())
++        restored = _engine()
++        restored._cpu_group = dist.group.WORLD
++        restored._load_from_dcp(checkpoint_dir, with_optim=True)
++        actual_losses = [_step(restored) for _ in range(3)]
++        _assert_nested_equal(actual_losses, expected_losses)
++        _assert_nested_equal(restored.model.state_dict(), expected_model)
++        _assert_nested_equal(restored.optimizer.state_dict(), expected_optim)
++        assert restored.get_version() == 8
++        # Both ranks must fail promptly even if only one runtime shard is lost.
++        if rank == 1:
++            (Path(checkpoint_dir) / "engine_state_rank_1.pt").unlink()
++        dist.barrier()
++        with pytest.raises(RuntimeError, match="DCP runtime validation failed"):
++            restored._load_from_dcp(checkpoint_dir, with_optim=True)
++    finally:
++        dist.destroy_process_group()
++
++
++@pytest.mark.slow
++@pytest.mark.ci
++def test_dcp_two_cpu_ranks_preserve_independent_rng_and_fail_together(tmp_path):
++    mp.start_processes(
++        _distributed_resume_worker,
++        args=(str(tmp_path / "checkpoint"), str(tmp_path / "init")),
++        nprocs=2,
++        join=True,
++        start_method="spawn",
++    )

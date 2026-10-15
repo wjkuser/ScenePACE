@@ -1,0 +1,11 @@
+ScenePACE includes modified components derived from NVIDIA SAGE (Apache-2.0).
+Original copyright and license notices are retained in derived source files.
+
+AReaL is included as a Git submodule under its upstream license. Local integration
+changes are distributed separately in patches/areal/runtime.patch.
+
+Material synthesis includes inference code from MatFuse. Its license is retained
+in matfuse-sd/LICENSE. The installer retrieves TRELLIS, CLIP, nvdiffrast,
+PyTorch3D, taming-transformers, utils3d, and mip-splatting from their upstream
+repositories; each retains its own license. Model weights and Isaac Sim are
+obtained separately and are subject to their respective licenses.

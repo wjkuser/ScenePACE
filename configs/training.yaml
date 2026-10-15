@@ -1,0 +1,196 @@
+experiment_name: scenepace-grpo
+trial_name: training
+seed: 1
+dynamic_bs: false
+enable_offload: false
+total_train_epochs: 1
+total_train_steps: 90
+task_visits: 3
+tasks_per_step: 4
+tokenizer_path: ${actor.path}
+workflow: scene_pace.remote_agent.RemoteSceneAgent
+use_final_appearance_critic: true
+max_tool_calls: ${oc.env:SCENEPACE_MAX_TOOL_CALLS,8}
+server_paths:
+- ${oc.env:SAGE_EFFICIENCY_ROOT}/server/layout_wo_robot.py
+cluster:
+  n_nodes: 2
+  n_gpus_per_node: 8
+  fileroot: ${oc.env:SCENEPACE_OUTPUT}/training
+  name_resolve:
+    type: nfs
+    nfs_record_root: ${cluster.fileroot}/name_resolve
+scheduler:
+  type: ray
+rollout:
+  backend: vllm:d1p1t1
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  tokenizer_path: ${tokenizer_path}
+  max_concurrent_rollouts: 1
+  queue_size: null
+  consumer_batch_size: ${train_dataset.batch_size}
+  max_head_offpolicyness: 0
+  enable_rollout_tracing: false
+  dump_to_file: true
+  setup_timeout: 1800
+  workers_ready_timeout: 300.0
+  request_timeout: 7200
+  scheduling_spec:
+  - task_type: worker
+    port_count: 2
+    gpu: 1
+    cmd: python3 -m areal.infra.rpc.rpc_server
+    env_vars:
+      NCCL_DEBUG: WARN
+      VLLM_USE_CUSTOM_ALLREDUCE: '0'
+  agent:
+    mode: inline
+    engine_max_tokens: ${oc.env:SCENEPACE_CONTEXT_TOKENS,16384}
+    admin_api_key: ${oc.env:SCENEPACE_PROXY_KEY,local-development}
+    tool_call_parser: qwen3_coder
+    reasoning_parser: qwen3
+    chat_template_type: hf
+    export_style: individual
+    turn_discount: 1.0
+    session_timeout_seconds: 5400
+gconfig:
+  n_samples: 4
+  min_new_tokens: 0
+  max_new_tokens: ${oc.env:SCENEPACE_OUTPUT_TOKENS,2048}
+  max_tokens: ${oc.env:SCENEPACE_CONTEXT_TOKENS,16384}
+  greedy: false
+  temperature: 0.6
+actor:
+  backend: fsdp:d8p1t1
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: ${oc.env:SCENEPACE_ACTOR_MODEL}
+  init_from_scratch: false
+  disable_dropout: true
+  attn_impl: flash_attention_2
+  gradient_checkpointing: true
+  dtype: bfloat16
+  optimizer_dtype: float32
+  mb_spec:
+    max_tokens_per_mb: 16384
+    n_mbs: 1
+  fsdp:
+    memory_efficient_load: true
+    offload_params: true
+    per_layer_optim_step: false
+  optimizer:
+    type: adam
+    lr: 1.0e-06
+    weight_decay: 0.01
+    beta1: 0.9
+    beta2: 0.999
+    eps: 1e-8
+    lr_scheduler_type: constant
+    gradient_clipping: 1.0
+    warmup_steps_proportion: 0.001
+  eps_clip: 0.4
+  temperature: ${gconfig.temperature}
+  reward_scaling: 1.0
+  reward_bias: 0.0
+  kl_ctl: 0.0
+  ppo_n_minibatches: 1
+  recompute_logprob: true
+  use_decoupled_loss: true
+  rejection_sampling:
+    metric: ratio
+    upper: 5.0
+  reward_norm: null
+  adv_norm: null
+  weight_update_mode: xccl
+  max_new_tokens: ${gconfig.max_new_tokens}
+  scheduling_spec:
+  - task_type: worker
+    port_count: 2
+    gpu: 8
+    cmd: python3 -m areal.infra.rpc.rpc_server
+    env_vars:
+      NCCL_DEBUG: WARN
+ref:
+  backend: ${actor.backend}
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: ${actor.path}
+  init_from_scratch: false
+  disable_dropout: true
+  attn_impl: ${actor.attn_impl}
+  dtype: ${actor.dtype}
+  optimizer_dtype: ${actor.optimizer_dtype}
+  mb_spec:
+    max_tokens_per_mb: 32768
+    n_mbs: 1
+  optimizer: null
+  scheduling_strategy:
+    type: colocation
+    target: actor
+  scheduling_spec: ${actor.scheduling_spec}
+vllm:
+  model: ${actor.path}
+  seed: ${seed}
+  skip_tokenizer_init: false
+  dtype: ${actor.dtype}
+  max_model_len: ${oc.env:SCENEPACE_CONTEXT_TOKENS,16384}
+  gpu_memory_utilization: 0.9
+train_dataset:
+  batch_size: 16
+  shuffle: false
+  pin_memory: true
+  num_workers: 0
+  path: sage_room_desc
+  type: rl
+  max_length: 4096
+valid_dataset: null
+saver:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}/checkpoints
+  freq_epochs: null
+  freq_steps: 5
+  freq_secs: null
+  mode: sync
+recover:
+  mode: auto
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}/recovery
+  freq_epochs: null
+  freq_steps: 5
+  freq_secs: null
+  no_save_optim: false
+  no_load_optim: false
+evaluator:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: null
+  freq_steps: null
+  freq_secs: null
+stats_logger:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  wandb:
+    mode: disabled
+    project: scenepace
+    group: ${trial_name}
+    name: ${experiment_name}-${trial_name}
+    tags:
+    - scenepace
+    - grpo
+  swanlab:
+    mode: disabled
+    project: scenepace
+    name: ${trial_name}
+perf_tracer:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  enabled: false
+  session_tracer:
+    enabled: false
